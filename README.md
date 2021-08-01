@@ -25,3 +25,5 @@ Octave shift 0 to -3 Octaves to give 0V on bottom C
 Scaling on individual notes to improve tuning
 
 Up/Down/Select buttons for menu
+
+Added polyphony count from 2-6 notes (mono & unison already exist)
