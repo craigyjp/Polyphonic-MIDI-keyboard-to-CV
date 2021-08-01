@@ -87,6 +87,8 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 int encoderPos, encoderPosPrev;
 Bounce encButton = Bounce();
+Bounce encoderA = Bounce();
+Bounce encoderB = Bounce();
 
 enum Menu {
   SETTINGS,
@@ -237,12 +239,12 @@ void setup()
   MIDI.setHandleControlChange(myControlChange);
   Serial.println("MIDI In DIN Listening");
 
-  //USB Client MIDI
-  usbMIDI.setHandleControlChange(myControlChange);
-  usbMIDI.setHandleNoteOff(myNoteOff);
-  usbMIDI.setHandleNoteOn(myNoteOn);
-  usbMIDI.setHandlePitchChange(myPitchBend);
-  Serial.println("USB Client MIDI Listening");
+//  //USB Client MIDI
+//  usbMIDI.setHandleControlChange(myControlChange);
+//  usbMIDI.setHandleNoteOff(myNoteOff);
+//  usbMIDI.setHandleNoteOn(myNoteOn);
+//  usbMIDI.setHandlePitchChange(myPitchBend);
+//  Serial.println("USB Client MIDI Listening");
 
 
   display.begin(SSD1306_SWITCHCAPVCC, 0x3C); // OLED I2C Address, may need to change for different device,
@@ -722,7 +724,7 @@ void loop()
   }
 
   MIDI.read(masterChan);//MIDI 5 Pin DIN
-  usbMIDI.read(masterChan); //USB Client MIDI
+//  usbMIDI.read(masterChan); //USB Client MIDI
 
 }
 
