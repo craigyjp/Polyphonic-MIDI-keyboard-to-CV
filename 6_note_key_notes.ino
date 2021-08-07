@@ -62,15 +62,6 @@
 #define ENC_B   15
 #define ENC_BTN 16
 
-#define GATE(CH) (CH==0 ? GATE_NOTE1 : (CH==1 ? GATE_NOTE2 : (CH==2 ? GATE_NOTE3: (CH==3 ? GATE_NOTE4: (CH==4 ? GATE_NOTE5 : (CH==5 ? GATE_NOTE6 : GATE_NOTE6))))))
-#define TRIG(CH) (CH==0 ? TRIG_NOTE1 : (CH==1 ? TRIG_NOTE2 : (CH==2 ? TRIG_NOTE3: (CH==3 ? TRIG_NOTE4: (CH==4 ? TRIG_NOTE5 : (CH==5 ? TRIG_NOTE6 : TRIG_NOTE6))))))
-
-#define NOTE_DAC(CH) (CH==0 ? DAC_NOTE1 : (CH==1 ? DAC_NOTE2 : (CH==2 ? DAC_NOTE3: (CH==3 ? DAC_NOTE4: (CH==4 ? DAC_NOTE5 : (CH==5 ? DAC_NOTE6 : DAC_NOTE6))))))
-#define NOTE_AB(CH)  (CH==1 ? 1 : 0)
-
-#define VEL_DAC(CH) (CH==0 ? DAC_NOTE1 : (CH==1 ? DAC_NOTE2 : (CH==2 ? DAC_NOTE3: (CH==3 ? DAC_NOTE4: (CH==4 ? DAC_NOTE5 : (CH==5 ? DAC_NOTE6 : DAC_NOTE6))))))
-#define VEL_AB(CH)  (CH==1 ? 0 : 1)
-
 #define PITCH_DAC DAC7
 #define PITCH_AB  0
 #define CC_DAC    DAC7
@@ -111,7 +102,11 @@ uint8_t ccChan;
 int masterChan;
 int masterTran;
 int polyphony;
-int transpose = 0;
+int transpose;
+int keyboardMode;
+int octave;
+int realoctave;
+int noteMsg;
 int8_t d2, i;
 
 float noteTrig[6];
@@ -134,22 +129,19 @@ struct VoiceAndNote voices[NO_OF_VOICES] = {
 };
 
 boolean voiceOn[NO_OF_VOICES] = {false, false, false, false, false, false};
+bool notes[88] = {0}, initial_loop = 1;
+int8_t noteOrder[40] = {0}, orderIndx = {0};
+bool S1, S2;
+
+unsigned long trigTimer = 0;
 
 int voiceToReturn = -1;//Initialise to 'null'
 long earliestTime = millis();//For voice allocation - initialise to now
 int  prevNote = 0;//Initialised to middle value
-int keyboardMode = 0;
-int octave = 0;
-int realoctave = 0;
+
 
 
 // MIDI setup
-
-//USB HOST MIDI Class Compliant
-//USBHost myusb;
-//USBHub hub1(myusb);
-//USBHub hub2(myusb);
-//MIDIDevice midi1(myusb);
 
 MIDI_CREATE_INSTANCE(HardwareSerial, Serial1, MIDI);
 //HardwareSerialMIDI_Interface midiser = Serial1;
@@ -223,13 +215,7 @@ void setup()
   digitalWrite(DAC7, HIGH);
 
   SPI.begin();
-  //
-  // control surface pipe test
-  //
-  //  midiusb << pipes << midiser; // all incoming midi from Serial is sent to USB
-  //
-  //  midiusb.begin();
-  // midiser.begin();
+
 
   //MIDI 5 Pin DIN
   MIDI.begin(masterChan);
@@ -238,13 +224,6 @@ void setup()
   MIDI.setHandlePitchBend(myPitchBend);
   MIDI.setHandleControlChange(myControlChange);
   Serial.println("MIDI In DIN Listening");
-
-//  //USB Client MIDI
-//  usbMIDI.setHandleControlChange(myControlChange);
-//  usbMIDI.setHandleNoteOff(myNoteOff);
-//  usbMIDI.setHandleNoteOn(myNoteOn);
-//  usbMIDI.setHandlePitchChange(myPitchBend);
-//  Serial.println("USB Client MIDI Listening");
 
 
   display.begin(SSD1306_SWITCHCAPVCC, 0x3C); // OLED I2C Address, may need to change for different device,
@@ -272,7 +251,8 @@ void setup()
   ccChan = masterChan;
 
   // Set defaults if EEPROM not initialized
-  if (keyboardMode > 2) keyboardMode = 0;
+
+  if (keyboardMode > 6) keyboardMode = 0;
   if (masterTran > 25) masterTran = 13;
   if (masterChan > 15) masterChan = 0;
   if (octave > 3) octave = 3;
@@ -288,11 +268,188 @@ void setup()
   encButton.attach(ENC_BTN);
   encButton.interval(5);  // interval in ms
 
-  setVoltage(PITCH_DAC, PITCH_AB, 1, 1024); // DAC7, channel 0, gain = 1X
+  setVoltage(PITCH_DAC, PITCH_AB, 1, 1023); // DAC7, channel 0, gain = 1X
   setVoltage(CC_DAC, CC_AB, 1, 0); // DAC7, channel 1, gain = 1X
 
   menu = SETTINGS;
   updateSelection();
+}
+
+void commandTopNote()
+{
+  int topNote = 0;
+  bool noteActive = false;
+
+  for (int i = 0; i < 88; i++)
+  {
+    if (notes[i]) {
+      topNote = i;
+      noteActive = true;
+    }
+  }
+
+  if (noteActive)
+    commandNote(topNote);
+  else // All notes are off, turn off gate
+    digitalWrite(GATE_NOTE1, LOW);
+}
+
+void commandBottomNote()
+{
+  int bottomNote = 0;
+  bool noteActive = false;
+
+  for (int i = 87; i >= 0; i--)
+  {
+    if (notes[i]) {
+      bottomNote = i;
+      noteActive = true;
+    }
+  }
+
+  if (noteActive)
+    commandNote(bottomNote);
+  else // All notes are off, turn off gate
+    digitalWrite(GATE_NOTE1, LOW);
+}
+
+void commandLastNote()
+{
+
+  int8_t noteIndx;
+
+  for (int i = 0; i < 40; i++) {
+    noteIndx = noteOrder[ mod(orderIndx - i, 40) ];
+    if (notes[noteIndx]) {
+      commandNote(noteIndx);
+      return;
+    }
+  }
+  digitalWrite(GATE_NOTE1, LOW); // All notes are off
+}
+
+void commandNote(int noteMsg) {
+  unsigned int mV = (unsigned int) ((float) (noteMsg + transpose + realoctave) * NOTE_SF * sfAdj[0] + 0.5);
+  setVoltage(DAC_NOTE1, 0, 1, mV);
+  digitalWrite(GATE_NOTE1, HIGH);
+  digitalWrite(TRIG_NOTE1, HIGH);
+  trigTimer = millis();
+  while (millis() < trigTimer + trigTimeout) {
+    // wait 50 milliseconds
+  }
+  digitalWrite(TRIG_NOTE1, LOW);
+
+}
+
+void commandTopNoteUni()
+{
+  int topNote = 0;
+  bool noteActive = false;
+
+  for (int i = 0; i < 88; i++)
+  {
+    if (notes[i]) {
+      topNote = i;
+      noteActive = true;
+    }
+  }
+
+  if (noteActive)
+    commandNoteUni(topNote);
+  else // All notes are off, turn off gate
+    digitalWrite(GATE_NOTE1, LOW);
+  digitalWrite(GATE_NOTE2, LOW);
+  digitalWrite(GATE_NOTE3, LOW);
+  digitalWrite(GATE_NOTE4, LOW);
+  digitalWrite(GATE_NOTE5, LOW);
+  digitalWrite(GATE_NOTE6, LOW);
+}
+
+void commandBottomNoteUni()
+{
+  int bottomNote = 0;
+  bool noteActive = false;
+
+  for (int i = 87; i >= 0; i--)
+  {
+    if (notes[i]) {
+      bottomNote = i;
+      noteActive = true;
+    }
+  }
+
+  if (noteActive)
+    commandNoteUni(bottomNote);
+  else // All notes are off, turn off gate
+    digitalWrite(GATE_NOTE1, LOW);
+  digitalWrite(GATE_NOTE2, LOW);
+  digitalWrite(GATE_NOTE3, LOW);
+  digitalWrite(GATE_NOTE4, LOW);
+  digitalWrite(GATE_NOTE5, LOW);
+  digitalWrite(GATE_NOTE6, LOW);
+}
+
+void commandLastNoteUni()
+{
+
+  int8_t noteIndx;
+
+  for (int i = 0; i < 40; i++) {
+    noteIndx = noteOrder[ mod(orderIndx - i, 40) ];
+    if (notes[noteIndx]) {
+      commandNoteUni(noteIndx);
+      return;
+    }
+  }
+  digitalWrite(GATE_NOTE1, LOW);
+  digitalWrite(GATE_NOTE2, LOW);
+  digitalWrite(GATE_NOTE3, LOW);
+  digitalWrite(GATE_NOTE4, LOW);
+  digitalWrite(GATE_NOTE5, LOW);
+  digitalWrite(GATE_NOTE6, LOW);// All notes are off
+}
+
+void commandNoteUni(int noteMsg) {
+
+  unsigned int mV1 = (unsigned int) ((float) (noteMsg + transpose + realoctave) * NOTE_SF * sfAdj[0] + 0.5);
+  setVoltage(DAC_NOTE1, 0, 1, mV1);
+  unsigned int mV2 = (unsigned int) ((float) (noteMsg + transpose + realoctave) * NOTE_SF * sfAdj[1] + 0.5);
+  setVoltage(DAC_NOTE2, 0, 1, mV2);
+  unsigned int mV3 = (unsigned int) ((float) (noteMsg + transpose + realoctave) * NOTE_SF * sfAdj[2] + 0.5);
+  setVoltage(DAC_NOTE3, 0, 1, mV3);
+  unsigned int mV4 = (unsigned int) ((float) (noteMsg + transpose + realoctave) * NOTE_SF * sfAdj[3] + 0.5);
+  setVoltage(DAC_NOTE4, 0, 1, mV4);
+  unsigned int mV5 = (unsigned int) ((float) (noteMsg + transpose + realoctave) * NOTE_SF * sfAdj[4] + 0.5);
+  setVoltage(DAC_NOTE5, 0, 1, mV5);
+  unsigned int mV6 = (unsigned int) ((float) (noteMsg + transpose + realoctave) * NOTE_SF * sfAdj[5] + 0.5);
+  setVoltage(DAC_NOTE6, 0, 1, mV6);
+
+  digitalWrite(TRIG_NOTE1, HIGH);
+  digitalWrite(GATE_NOTE1, HIGH);
+  digitalWrite(TRIG_NOTE2, HIGH);
+  digitalWrite(GATE_NOTE2, HIGH);
+  digitalWrite(TRIG_NOTE3, HIGH);
+  digitalWrite(GATE_NOTE3, HIGH);
+  digitalWrite(TRIG_NOTE4, HIGH);
+  digitalWrite(GATE_NOTE4, HIGH);
+  digitalWrite(TRIG_NOTE5, HIGH);
+  digitalWrite(GATE_NOTE5, HIGH);
+  digitalWrite(TRIG_NOTE6, HIGH);
+  digitalWrite(GATE_NOTE6, HIGH);
+  
+  trigTimer = millis();
+  while (millis() < trigTimer + trigTimeout) {
+    // wait 50 milliseconds
+  }
+  
+  digitalWrite(TRIG_NOTE1, LOW);
+  digitalWrite(TRIG_NOTE2, LOW);
+  digitalWrite(TRIG_NOTE3, LOW);
+  digitalWrite(TRIG_NOTE4, LOW);
+  digitalWrite(TRIG_NOTE5, LOW);
+  digitalWrite(TRIG_NOTE6, LOW);
+
+
 }
 
 void myPitchBend(byte channel, int bend) {
@@ -301,9 +458,7 @@ void myPitchBend(byte channel, int bend) {
     // With DAC gain = 1X, this will yield a range from 0 to 1023 mV.  Additional amplification
     // after DAC will rescale to -1 to +1V.
     d2 = MIDI.getData2(); // d2 from 0 to 127, mid point = 64
-    Serial.print("MIDI Pitch Bend ");
-    Serial.println(bend);
-    setVoltage(PITCH_DAC, PITCH_AB, 1, int((bend / 8) + 1024)); // DAC7, channel 0, gain = 1X
+    setVoltage(PITCH_DAC, PITCH_AB, 1, int((bend / 8) + 1023)); // DAC7, channel 0, gain = 1X
   }
 }
 
@@ -312,18 +467,18 @@ void myControlChange(byte channel, byte number, byte value) {
     d2 = MIDI.getData2();
     // CC range from 0 to 2047 mV  Left shift d2 by 5 to scale from 0 to 2047,
     // and choose gain = 2X
-    Serial.print("Mod Wheel ");
-    Serial.println(value);
     setVoltage(CC_DAC, CC_AB, 1, value << 4); // DAC7, channel 1, gain = 1X
   }
 }
 
-void myNoteOn(byte channel, byte note, byte velocity) {
+void myNoteOn(byte channel, byte note, byte velocity)
+{
   //Check for out of range notes
   if (note < 0 || note > 127) return;
 
   prevNote = note;
-  if (keyboardMode == 0) {
+  if (keyboardMode == 0)
+  {
     switch (getVoiceNo(-1)) {
       case 1:
         voices[0].note = note;
@@ -416,78 +571,95 @@ void myNoteOn(byte channel, byte note, byte velocity) {
         voiceOn[5] = true;
         break;
     }
-  } else if (keyboardMode == 2)
-    // MONO MODE
-  { voices[0].note = note;
-    voices[0].velocity = velocity;
-    voices[0].timeOn = millis();
-    updateVoice1();
-
-    digitalWrite(GATE_NOTE1, HIGH);
-    digitalWrite(TRIG_NOTE1, HIGH);
-    monoTrig = millis();
-    while (millis() < monoTrig + trigTimeout) {
-      // wait 50 milliseconds
-    }
-    digitalWrite(TRIG_NOTE1, LOW);
-    voiceOn[0] = true;
-  } else if (keyboardMode == 1)
+  }
+  else if (keyboardMode == 4 || keyboardMode == 5 || keyboardMode == 6)
   {
-    //UNISON MODE
-    voices[0].note = note;
-    voices[0].velocity = velocity;
-    voices[0].timeOn = millis();
-    updateVoice1();
-    voices[1].note = note;
-    voices[1].velocity = velocity;
-    voices[1].timeOn = millis();
-    updateVoice2();
-    voices[2].note = note;
-    voices[2].velocity = velocity;
-    voices[2].timeOn = millis();
-    updateVoice3();
-    voices[3].note = note;
-    voices[3].velocity = velocity;
-    voices[3].timeOn = millis();
-    updateVoice4();
-    voices[4].note = note;
-    voices[4].velocity = velocity;
-    voices[4].timeOn = millis();
-    updateVoice5();
-    voices[5].note = note;
-    voices[5].velocity = velocity;
-    voices[5].timeOn = millis();
-    updateVoice6();
-    digitalWrite(GATE_NOTE1, HIGH);
-    digitalWrite(TRIG_NOTE1, HIGH);
-    digitalWrite(GATE_NOTE2, HIGH);
-    digitalWrite(TRIG_NOTE2, HIGH);
-    digitalWrite(GATE_NOTE3, HIGH);
-    digitalWrite(TRIG_NOTE3, HIGH);
-    digitalWrite(GATE_NOTE4, HIGH);
-    digitalWrite(TRIG_NOTE4, HIGH);
-    digitalWrite(GATE_NOTE5, HIGH);
-    digitalWrite(TRIG_NOTE5, HIGH);
-    digitalWrite(GATE_NOTE6, HIGH);
-    digitalWrite(TRIG_NOTE6, HIGH);
-
-    unisonTrig = millis();
-    while (millis() < unisonTrig + trigTimeout) {
-      // wait 50 milliseconds
+    if (keyboardMode == 4)
+    {
+      S1 = 1;
+      S2 = 1;
     }
-    digitalWrite(TRIG_NOTE1, LOW);
-    digitalWrite(TRIG_NOTE2, LOW);
-    digitalWrite(TRIG_NOTE3, LOW);
-    digitalWrite(TRIG_NOTE4, LOW);
-    digitalWrite(TRIG_NOTE5, LOW);
-    digitalWrite(TRIG_NOTE6, LOW);
+    if (keyboardMode == 5)
+    {
+      S1 = 0;
+      S2 = 1;
+    }
+    if (keyboardMode == 6)
+    {
+      S1 = 0;
+      S2 = 0;
+    }
+    noteMsg = note;
 
-    voiceOn[0] = true;
-    voiceOn[1] = true;
-    voiceOn[2] = true;
-    voiceOn[3] = true;
-    voiceOn[4] = true;
-    voiceOn[5] = true;
+    if (velocity == 0)  {
+      notes[noteMsg] = false;
+    }
+    else {
+      notes[noteMsg] = true;
+    }
+
+    unsigned int velmV = ((unsigned int) ((float) velocity) * 1.25);
+    setVoltage(DAC_NOTE1, 1, 1, velmV << 4 );
+    if (S1 && S2) { // Highest note priority
+      commandTopNote();
+    }
+    else if (!S1 && S2) { // Lowest note priority
+      commandBottomNote();
+    }
+    else { // Last note priority
+      if (notes[noteMsg]) {  // If note is on and using last note priority, add to ordered list
+        orderIndx = (orderIndx + 1) % 40;
+        noteOrder[orderIndx] = noteMsg;
+      }
+      commandLastNote();
+    }
+  }
+  else if (keyboardMode == 1 || keyboardMode == 2 || keyboardMode == 3)
+  {
+    if (keyboardMode == 1)
+    {
+      S1 = 1;
+      S2 = 1;
+    }
+    if (keyboardMode == 2)
+    {
+      S1 = 0;
+      S2 = 1;
+    }
+    if (keyboardMode == 3)
+    {
+      S1 = 0;
+      S2 = 0;
+    }
+    noteMsg = note;
+
+    if (velocity == 0)  {
+      notes[noteMsg] = false;
+    }
+    else {
+      notes[noteMsg] = true;
+    }
+
+    unsigned int velmV = ((unsigned int) ((float) velocity) * 1.25);
+    setVoltage(DAC_NOTE1, 1, 1, velmV << 4 );
+    setVoltage(DAC_NOTE2, 1, 1, velmV << 4 );
+    setVoltage(DAC_NOTE3, 1, 1, velmV << 4 );
+    setVoltage(DAC_NOTE4, 1, 1, velmV << 4 );
+    setVoltage(DAC_NOTE5, 1, 1, velmV << 4 );
+    setVoltage(DAC_NOTE5, 1, 1, velmV << 4 );
+    if (S1 && S2) { // Highest note priority
+      commandTopNoteUni();
+    }
+    else if (!S1 && S2) { // Lowest note priority
+      commandBottomNoteUni();
+    }
+    else { // Last note priority
+      if (notes[noteMsg]) {  // If note is on and using last note priority, add to ordered list
+        orderIndx = (orderIndx + 1) % 40;
+        noteOrder[orderIndx] = noteMsg;
+      }
+      commandLastNoteUni();
+    }
   }
 }
 
@@ -525,44 +697,95 @@ void myNoteOff(byte channel, byte note, byte velocity) {
         voiceOn[5] = false;
         break;
     }
-  } else if (keyboardMode == 2)
+  } else if (keyboardMode == 4 || keyboardMode == 5 || keyboardMode == 6)
   {
-    //MONO MODE
-    firstNoteOff();
-  } else if (keyboardMode == 1)
+    if (keyboardMode == 4)
+    {
+      S1 = 1;
+      S2 = 1;
+    }
+    if (keyboardMode == 5)
+    {
+      S1 = 0;
+      S2 = 1;
+    }
+    if (keyboardMode == 6)
+    {
+      S1 = 0;
+      S2 = 0;
+    }
+    noteMsg = note;
+
+    if (velocity == 0)  {
+      notes[noteMsg] = false;
+    }
+    else {
+      notes[noteMsg] = true;
+    }
+
+    // Pins NP_SEL1 and NP_SEL2 indictate note priority
+    unsigned int velmV = ((unsigned int) ((float) velocity) * 1.25);
+    setVoltage(DAC_NOTE1, 1, 1, velmV << 4 );
+    if (S1 && S2) { // Highest note priority
+      commandTopNote();
+    }
+    else if (!S1 && S2) { // Lowest note priority
+      commandBottomNote();
+    }
+    else { // Last note priority
+      if (notes[noteMsg]) {  // If note is on and using last note priority, add to ordered list
+        orderIndx = (orderIndx + 1) % 40;
+        noteOrder[orderIndx] = noteMsg;
+      }
+      commandLastNote();
+    }
+  } else if (keyboardMode == 1 || keyboardMode == 2 || keyboardMode == 3)
   {
-    //UNISON MODE
-    allNotesOff();
+    if (keyboardMode == 1)
+    {
+      S1 = 1;
+      S2 = 1;
+    }
+    if (keyboardMode == 2)
+    {
+      S1 = 0;
+      S2 = 1;
+    }
+    if (keyboardMode == 3)
+    {
+      S1 = 0;
+      S2 = 0;
+    }
+    noteMsg = note;
+
+    if (velocity == 0)  {
+      notes[noteMsg] = false;
+    }
+    else {
+      notes[noteMsg] = true;
+    }
+
+    unsigned int velmV = ((unsigned int) ((float) velocity) * 1.25);
+    setVoltage(DAC_NOTE1, 1, 1, velmV << 4 );
+    setVoltage(DAC_NOTE2, 1, 1, velmV << 4 );
+    setVoltage(DAC_NOTE3, 1, 1, velmV << 4 );
+    setVoltage(DAC_NOTE4, 1, 1, velmV << 4 );
+    setVoltage(DAC_NOTE5, 1, 1, velmV << 4 );
+    setVoltage(DAC_NOTE6, 1, 1, velmV << 4 );
+    if (S1 && S2) { // Highest note priority
+      commandTopNoteUni();
+    }
+    else if (!S1 && S2) { // Lowest note priority
+      commandBottomNoteUni();
+    }
+    else { // Last note priority
+      if (notes[noteMsg]) {  // If note is on and using last note priority, add to ordered list
+        orderIndx = (orderIndx + 1) % 40;
+        noteOrder[orderIndx] = noteMsg;
+      }
+      commandLastNoteUni();
+    }
   }
-}
-
-void allNotesOff() {
-  digitalWrite(GATE_NOTE1, LOW);
-  digitalWrite(GATE_NOTE2, LOW);
-  digitalWrite(GATE_NOTE3, LOW);
-  digitalWrite(GATE_NOTE4, LOW);
-  digitalWrite(GATE_NOTE5, LOW);
-  digitalWrite(GATE_NOTE6, LOW);
-
-  voices[0].note = -1;
-  voices[1].note = -1;
-  voices[2].note = -1;
-  voices[3].note = -1;
-  voices[4].note = -1;
-  voices[5].note = -1;
-
-  voiceOn[0] = false;
-  voiceOn[1] = false;
-  voiceOn[2] = false;
-  voiceOn[3] = false;
-  voiceOn[4] = false;
-  voiceOn[5] = false;
-}
-
-void firstNoteOff() {
-  digitalWrite(GATE_NOTE1, LOW);
-  voices[0].note = -1;
-  voiceOn[0] = false;
 }
 
 int getVoiceNo(int note) {
@@ -602,103 +825,46 @@ int getVoiceNo(int note) {
 }
 
 void updateVoice1() {
-  if (keyboardMode == 1) {
     unsigned int mV = (unsigned int) ((float) (voices[0].note + transpose + realoctave) * NOTE_SF * sfAdj[0] + 0.5);
     setVoltage(DAC_NOTE1, 0, 1, mV);
     unsigned int velmV = ((unsigned int) ((float) voices[0].velocity) * 1.25);
     setVoltage(DAC_NOTE1, 1, 1, velmV << 4 );
-  }
-  else
-  {
-    unsigned int mV = (unsigned int) ((float) (voices[0].note + transpose + realoctave) * NOTE_SF * sfAdj[0] + 0.5);
-    setVoltage(DAC_NOTE1, 0, 1, mV);
-    unsigned int velmV = ((unsigned int) ((float) voices[0].velocity) * 1.25);
-    setVoltage(DAC_NOTE1, 1, 1, velmV << 4 );
-  }
 }
 
 void updateVoice2() {
-  if (keyboardMode == 1) {
-    unsigned int mV = (unsigned int) ((float) (voices[0].note + transpose + realoctave) * NOTE_SF * sfAdj[1] + 0.5);
-    setVoltage(DAC_NOTE2, 0, 1, mV);
-    unsigned int velmV = ((unsigned int) ((float) voices[0].velocity) * 1.25);
-    setVoltage(DAC_NOTE2, 1, 1, velmV << 4 );
-  }
-  else
-  {
     unsigned int mV = (unsigned int) ((float) (voices[1].note + transpose + realoctave) * NOTE_SF * sfAdj[1] + 0.5);
     setVoltage(DAC_NOTE2, 0, 1, mV);
     unsigned int velmV = ((unsigned int) ((float) voices[1].velocity) * 1.25);
     setVoltage(DAC_NOTE2, 1, 1, velmV << 4 );
-  }
 }
 
 void updateVoice3() {
-  if (keyboardMode == 1) {
-    unsigned int mV = (unsigned int) ((float) (voices[0].note + transpose + realoctave) * NOTE_SF * sfAdj[2] + 0.5);
-    setVoltage(DAC_NOTE3, 0, 1, mV);
-    unsigned int velmV = ((unsigned int) ((float) voices[0].velocity) * 1.25);
-    setVoltage(DAC_NOTE3, 1, 1, velmV << 4 );
-  }
-  else
-  {
     unsigned int mV = (unsigned int) ((float) (voices[2].note + transpose + realoctave) * NOTE_SF * sfAdj[2] + 0.5);
     setVoltage(DAC_NOTE3, 0, 1, mV);
     unsigned int velmV = ((unsigned int) ((float) voices[2].velocity) * 1.25);
     setVoltage(DAC_NOTE3, 1, 1, velmV << 4 );
-  }
 }
 
 void updateVoice4() {
-  if (keyboardMode == 1) {
-    unsigned int mV = (unsigned int) ((float) (voices[0].note + transpose + realoctave) * NOTE_SF * sfAdj[3] + 0.5);
-    setVoltage(DAC_NOTE4, 0, 1, mV);
-    unsigned int velmV = ((unsigned int) ((float) voices[0].velocity) * 1.25);
-    setVoltage(DAC_NOTE4, 1, 1, velmV << 4 );
-  }
-  else
-  {
     unsigned int mV = (unsigned int) ((float) (voices[3].note + transpose + realoctave) * NOTE_SF * sfAdj[3] + 0.5);
     setVoltage(DAC_NOTE4, 0, 1, mV);
     unsigned int velmV = ((unsigned int) ((float) voices[3].velocity) * 1.25);
     setVoltage(DAC_NOTE4, 1, 1, velmV << 4 );
-  }
 }
 
 void updateVoice5() {
-  if (keyboardMode == 1) {
-    unsigned int mV = (unsigned int) ((float) (voices[0].note + transpose + realoctave) * NOTE_SF * sfAdj[4] + 0.5);
-    setVoltage(DAC_NOTE5, 0, 1, mV);
-    unsigned int velmV = ((unsigned int) ((float) voices[0].velocity) * 1.25);
-    setVoltage(DAC_NOTE5, 1, 1, velmV << 4 );
-  }
-  else
-  {
     unsigned int mV = (unsigned int) ((float) (voices[4].note + transpose + realoctave) * NOTE_SF * sfAdj[4] + 0.5);
     setVoltage(DAC_NOTE5, 0, 1, mV);
     unsigned int velmV = ((unsigned int) ((float) voices[4].velocity) * 1.25);
     setVoltage(DAC_NOTE5, 1, 1, velmV << 4 );
-  }
 }
 
 void updateVoice6() {
-  if (keyboardMode == 1) {
-    unsigned int mV = (unsigned int) ((float) (voices[0].note + transpose + realoctave) * NOTE_SF * sfAdj[5] + 0.5);
-    setVoltage(DAC_NOTE6, 0, 1, mV);
-    unsigned int velmV = ((unsigned int) ((float) voices[0].velocity) * 1.25);
-    setVoltage(DAC_NOTE6, 1, 1, velmV << 4 );
-  }
-  else
-  {
     unsigned int mV = (unsigned int) ((float) (voices[5].note + transpose + realoctave) * NOTE_SF * sfAdj[5] + 0.5);
     setVoltage(DAC_NOTE6, 0, 1, mV);
     unsigned int velmV = ((unsigned int) ((float) voices[5].velocity) * 1.25);
     setVoltage(DAC_NOTE6, 1, 1, velmV << 4 );
-  }
 }
-
-bool notes[6][88] = {0}, initial_loop = 1;
-int8_t noteOrder[6][10] = {0}, orderIndx[6] = {0};
 
 void loop()
 {
@@ -724,7 +890,6 @@ void loop()
   }
 
   MIDI.read(masterChan);//MIDI 5 Pin DIN
-//  usbMIDI.read(masterChan); //USB Client MIDI
 
 }
 
@@ -884,7 +1049,7 @@ void updateSelection() { // Called whenever encoder is turned
   display.clearDisplay();
   switch (menu) {
     case KEYBOARD_MODE_SET_CH:
-      if (menu == KEYBOARD_MODE_SET_CH) keyboardMode = mod(encoderPos, 3);
+      if (menu == KEYBOARD_MODE_SET_CH) keyboardMode = mod(encoderPos, 7);
 
     case MIDI_CHANNEL_SET_CH:
       if (menu == MIDI_CHANNEL_SET_CH) masterChan = mod(encoderPos, 17);
@@ -908,8 +1073,13 @@ void updateSelection() { // Called whenever encoder is turned
       display.print(F("Keyboard Mode "));
       if (menu == KEYBOARD_MODE_SET_CH) display.setTextColor(BLACK, WHITE);
       if (keyboardMode == 0) display.print("Poly  ");
-      if (keyboardMode == 1) display.print("Unison");
-      if (keyboardMode == 2) display.print("Mono  ");
+      if (keyboardMode == 1) display.print("Uni T");
+      if (keyboardMode == 2) display.print("Uni B");
+      if (keyboardMode == 3) display.print("Uni L");
+      if (keyboardMode == 4) display.print("Mono T ");
+      if (keyboardMode == 5) display.print("Mono B ");
+      if (keyboardMode == 6) display.print("Mono L ");
+
       display.println(F(""));
       display.setTextColor(WHITE, BLACK);
 
