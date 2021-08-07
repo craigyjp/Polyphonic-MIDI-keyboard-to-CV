@@ -16,7 +16,7 @@ Pitchbend and CC outputs
 
 MIDI Channel selection or Omni
 
-Poly/Unison/Mono modes
+Poly/Unison/Mono key modes with Top/Bottom/Last note priority settings
 
 Transpose Mode +/- one Octave
 
